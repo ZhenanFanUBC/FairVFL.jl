@@ -8,18 +8,15 @@ mutable struct Client{T1<:Int64, T2<:Float64, T3<:Vector{T1}, T4<:Matrix{T2}, T5
     num_classes::T1                         # number of classes
     num_clients::T1                         # number of clients
     num_epoches::T1                         # number of epoches
-    batch_size::T1                          # number of batches
-    learning_rate::T2                       # learning rate
+    η::T2                                   # learning rate
     W::Union{T4, T6}                        # client model
-    batch::T3                               # mini-batch
     grads::T4                               # gradient information
     back                                    # backward operator
     function Client(id::Int64, Xtrain::SparseMatrixCSC{Float64, Int64}, Xtest::SparseMatrixCSC{Float64, Int64}, config::Dict{String, Union{Int64, Float64, String}})
         num_classes = config["num_classes"]
         num_clients = config["num_clients"]
         num_epoches = config["num_epoches"]
-        batch_size = config["batch_size"]
-        learning_rate = config["learning_rate"]
+        η = config["learning_rate_model"]
         dm = size(Xtrain, 1)
         if config["local_model"] == "linear"
             W = zeros(Float64, num_classes, dm)
@@ -27,15 +24,9 @@ mutable struct Client{T1<:Int64, T2<:Float64, T3<:Vector{T1}, T4<:Matrix{T2}, T5
             W = Chain(Dense(dm, 32, σ), Dense(32, num_classes))
         end
         back = undef
-        batch = zeros(Int64, batch_size)
-        grads = zeros(Float64, num_classes, batch_size)
-        new{Int64, Float64, Vector{Int64}, Matrix{Float64}, SparseMatrixCSC{Float64, Int64},Flux.Chain}(id, Xtrain, Xtest, num_classes, num_clients, num_epoches, batch_size, learning_rate, W, batch, grads, back)
+        grads = zeros(Float64, num_classes, size(Xtrain, 2))
+        new{Int64, Float64, Vector{Int64}, Matrix{Float64}, SparseMatrixCSC{Float64, Int64},Flux.Chain}(id, Xtrain, Xtest, num_classes, num_clients, num_epoches, η, W, grads, back)
     end
-end
-
-# update batch 
-function update_batch!(c::Client, batch::Vector{Int64})
-    c.batch .= batch
 end
 
 # update gradient information
@@ -46,16 +37,12 @@ end
 # update client model W
 function update_model!(c::Client)
     if typeof(c.W) <: Matrix{Float64}
-        Xbatch = c.Xtrain[:, c.batch]
-        Wgrad = (c.grads * Xbatch') ./ c.batch_size
-        c.W .-= c.learning_rate * Wgrad
+        Wgrad = c.grads * c.Xtrain'
+        c.W .-= c.η * Wgrad
     else
         gs = c.back(c.grads)
         w = params(c.W)
-        # for i = 1:length(w)
-        #     w[i] .-= (c.learning_rate / c.batch_size) * gs[w[i]]
-        # end
-        Flux.Optimise.update!(ADAM(), w, gs)
+        Flux.Optimise.update!(Descent(c.η), w, gs)
     end  
 end
 

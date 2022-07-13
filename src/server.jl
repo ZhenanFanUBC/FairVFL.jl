@@ -1,35 +1,39 @@
 ########################################################################
 # Server for synchronous learning
 ########################################################################
-mutable struct Server{T1<:Int64, T2<:Float64, T3<:Vector{T2}, T4<:Vector{T1}, T5<:Matrix{T2}, T6<:Array{T2, 3}, T7<:Vector{Client}} 
+mutable struct Server{T1<:Int64, T2<:Float64, T3<:Vector{T2}, T4<:Vector{T1}, T5<:Matrix{T2}, T6<:Vector{Client}, T7<:Dict{T1, String}} 
     Ytrain::T4                       # training label
     Ytest::T4                        # test label
     num_classes::T1                  # number of classes
     num_clients::T1                  # number of clients
     num_epoches::T1                  # number of epoches
-    batch_size::T1                   # batch size
-    learning_rate::T2                # learning rate
-    clients::T7                      # set of clients
-    b::T3                            # server model
-    embeddings::T6                   # embeddings for batches
-    train_embeddings::T6             # embeddings for all training data (used for final evaluation)
-    test_embeddings::T6              # embeddings for all test data (used for final evaluation)
-    batch::T4                        # mini-batch
+    clients::T6                      # set of clients
+    train_embeddings::T5             # embeddings for all training data 
+    test_embeddings::T5              # embeddings for all test data 
+    idxDict::T7                      # Dictionary for protected classes
     grads::T5                        # gradient information
-    function Server(Ytrain::Vector{Int64}, Ytest::Vector{Int64}, config::Dict{String, Union{Int64, Float64, String}})
+    λ::T3                            # Lagrangian multipliers
+    ϵ::T2                            # fairness tolerance
+    β::T2                            # learning rate for λ
+    na::T1                           # number of training points in protected class a
+    nb::T1                           # number of training points in protected class b
+    function Server(Ytrain::Vector{Int64}, 
+                    Ytest::Vector{Int64}, 
+                    idxDict::Dict{Int64, String},
+                    na::Int64,
+                    nb::Int64,
+                    config::Dict{String, Union{Int64, Float64, String}})
         num_classes = config["num_classes"]
         num_clients = config["num_clients"]
         num_epoches = config["num_epoches"]
-        batch_size = config["batch_size"]
-        learning_rate = config["learning_rate"]
+        ϵ = config["fairness_tolerance"]
+        β = config["learning_rate_lambda"]
+        λ = zeros(Float64, 2)
         clients = Vector{Client}(undef, num_clients)
-        b = zeros(Float64, num_classes)
-        embeddings = zeros(Float64, num_clients, num_classes, batch_size)
-        train_embeddings = zeros(Float64, num_clients, num_classes, length(Ytrain))
-        test_embeddings = zeros(Float64, num_clients, num_classes, length(Ytest))
-        batch = zeros(Int64, batch_size)
-        grads = zeros(Float64, num_classes, batch_size)
-        new{Int64, Float64, Vector{Float64}, Vector{Int64}, Matrix{Float64}, Array{Float64, 3}, Vector{Client}}(Ytrain, Ytest, num_classes, num_clients, num_epoches, batch_size, learning_rate, clients, b, embeddings, train_embeddings, test_embeddings, batch, grads)
+        train_embeddings = zeros(Float64, num_classes, length(Ytrain))
+        test_embeddings = zeros(Float64, num_classes, length(Ytest))
+        grads = zeros(Float64, num_classes, length(Ytrain))
+        new{Int64, Float64, Vector{Float64}, Vector{Int64}, Matrix{Float64}, Vector{Client}, Dict{Int64, String}}(Ytrain, Ytest, num_classes, num_clients, num_epoches, clients, train_embeddings, test_embeddings, idxDict, grads, λ, ϵ, β, na, nb)
     end
 end
 
@@ -38,25 +42,14 @@ function connect!(s::Server, c::Client)
     s.clients[c.id] = c
 end
 
-# update batch 
-function update_batch!(s::Server, batch::Vector{Int64})
-    s.batch .= batch
-end
 
 # send embeddings to server
-function send_embedding!(c::Client, s::Server; tag = "batch")
-    if tag == "batch"
-        Xbatch = c.Xtrain[:, c.batch]
-        if typeof(c.W) <: Matrix{Float64}
-            embedding = c.W * Xbatch
-        else
-            embedding, c.back = Zygote.pullback(()->c.W(Xbatch), params(c.W))
-        end
-    elseif tag == "training"
+function send_embedding!(c::Client, s::Server; tag = "training")
+    if tag == "training"
         if typeof(c.W) <: Matrix{Float64}
             embedding = c.W * c.Xtrain
         else
-            embedding = c.W(c.Xtrain)
+            embedding, c.back = Zygote.pullback(()->c.W(c.Xtrain), params(c.W))
         end
     else
         if typeof(c.W) <: Matrix{Float64}
@@ -65,35 +58,46 @@ function send_embedding!(c::Client, s::Server; tag = "batch")
             embedding = c.W(c.Xtest)
         end
     end
-    update_embedding!(s, c.id, embedding, tag=tag)
+    update_embedding!(s, embedding, tag=tag)
 end
 
 # update embedding
-function update_embedding!(s::Server, id::Int64, embedding::Matrix{Float64}; tag = "batch")
-    if tag == "batch"
-        s.embeddings[id,:,:] .= embedding
-    elseif tag == "training"
-        s.train_embeddings[id,:,:] .= embedding
+function update_embedding!(s::Server, embedding::Matrix{Float64}; tag = "training")
+    if tag == "training"
+        s.train_embeddings .+= embedding
     else
-        s.test_embeddings[id,:,:] .= embedding
+        s.test_embeddings .+= embedding
     end
 end
 
-# compute mini-batch gradient
-function compute_mini_batch_gradient!(s::Server)
-    batch_size = s.batch_size
+# compute gradient
+function compute_gradient!(s::Server)
     num_classes = s.num_classes
-    sum_embeddings = reshape( sum( s.embeddings, dims=1), num_classes, batch_size )
+    num_data = length(s.Ytrain)
     loss = 0.0
-    grads = zeros( num_classes, batch_size )
-    # compute mini-batch gradient
-    for i = 1:batch_size
-        y = s.Ytrain[ s.batch[i] ]
-        emb = sum_embeddings[:, i] + s.b
+    loss_a = 0.0
+    loss_b = 0.0
+    grads = zeros( num_classes, num_data )
+    # compute gradient
+    for i = 1:num_data
+        y = s.Ytrain[i]
+        emb = s.train_embeddings[:,i]
         pred = softmax(emb)
-        loss += neg_log_loss(pred, y)
+        Δloss = neg_log_loss(pred, y)
+        loss += Δloss
         grads[:, i] .= pred
         grads[y, i] -= 1.0
+        # scaling of the gradients
+        if s.idxDict[i] == "a"
+            v = 1/num_data + (s.λ[1] - s.λ[2])/s.na
+            loss_a += Δloss
+        elseif s.idxDict[i] == "b"
+            v = 1/num_data - (s.λ[1] - s.λ[2])/s.nb
+            loss_b += Δloss
+        else
+            v = 1/num_data
+        end
+        grads[:, i] .*= v
     end
     # update local gradient information 
     s.grads .= grads
@@ -101,14 +105,19 @@ function compute_mini_batch_gradient!(s::Server)
     for c in s.clients
         update_grads!(c, grads)
     end
+    # set embeddings to be zero
+    s.train_embeddings .= 0.0
     # return mini-batch loss
-    return loss / batch_size
+    return loss/num_data, loss_a/s.na, loss_b/s.nb
 end
 
-# update server model b
-function update_model!(s::Server)
-    bgrad = sum(s.grads, dims=2) ./ s.batch_size
-    s.b .-= s.learning_rate * bgrad[:]
+# update Lagrangian multipliers
+function update_λ!(s::Server, loss_a::Float64, loss_b::Float64)
+    D = loss_a - loss_b
+    g = s.β*[D - s.ϵ; -D - s.ϵ]
+    s.λ .+= g
+    s.λ[1] = max(s.λ[1], 0.0)
+    s.λ[2] = max(s.λ[2], 0.0)
 end
 
 
@@ -212,16 +221,13 @@ end
 function eval(s::Union{Server, AsynServer})
     train_size = length(s.Ytrain)
     test_size = length(s.Ytest)
-    num_classes = s.num_classes
-    sum_train_embeddings = reshape( sum( s.train_embeddings, dims=1), num_classes, train_size )
-    sum_test_embeddings = reshape( sum( s.test_embeddings, dims=1), num_classes, test_size )
     train_loss = 0.0
     train_acc = 0.0
     test_loss = 0.0
     test_acc = 0.0
     for i = 1:train_size
         y = s.Ytrain[i]
-        emb = sum_train_embeddings[:, i] + s.b
+        emb = s.train_embeddings[:, i] 
         pred = softmax(emb)
         train_loss += neg_log_loss(pred, y)
         if argmax(pred) == y
@@ -230,7 +236,7 @@ function eval(s::Union{Server, AsynServer})
     end
     for i = 1:test_size
         y = s.Ytest[i]
-        emb = sum_test_embeddings[:, i] + s.b
+        emb = s.test_embeddings[:, i]
         pred = softmax(emb)
         test_loss += neg_log_loss(pred, y)
         if argmax(pred) == y

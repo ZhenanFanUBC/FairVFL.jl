@@ -2,48 +2,29 @@
 # Synchronous Vertical Federated Logistic Regression
 ########################################################################
 
-function vertical_lr_train!(server::Server, clients::Vector{Client})
+function fair_vertical_lr_train!(server::Server, clients::Vector{Client})
     # number of epoches
     num_epoches = server.num_epoches 
-    # number of training data
-    num_train_data = length(server.Ytrain)
-    # batch size
-    batch_size = server.batch_size
-    # number of batches
-    num_batches = div(num_train_data, batch_size)
-    # round
-    round = 1
     # start training
     @inbounds for epoch = 1:num_epoches
-        # generate mini-batches
-        batches = generate_batches(num_train_data, num_batches)
-        @inbounds for i = 1:num_batches
-            batch = batches[i]
-            # server updates batch information
-            update_batch!(server, batch)
-            Threads.@threads for c in clients
-                # client updates batch information
-                update_batch!(c, batch)
-                # client compute and upload embeddings
-                send_embedding!(c, server)
-            end
-            # server compute the loss and the gradient
-            batch_loss = compute_mini_batch_gradient!(server)
-            if i % 1 == 0
-                @printf "Epoch %d, Batch %d, Loss %.2f\n" epoch i batch_loss
-            end
-            # server and clients update model
-            update_model!(server)
-            Threads.@threads for c in clients
-                update_model!(c)
-            end
-            # update round
-            round += 1
+        for c in clients
+            # client compute and upload embeddings
+            send_embedding!(c, server)
+        end
+        # server compute the loss and the gradient
+        loss, loss_a, loss_b = compute_gradient!(server)
+        @printf "Epoch %d, Loss %.2f, Loss(a) %.2f, Loss(b) %.2f\n" epoch loss loss_a loss_b
+        # server and clients update model
+        update_λ!(server, loss_a, loss_b)
+        for c in clients
+            update_model!(c)
         end
     end
 end
 
 function evaluation(server::Server, clients::Vector{Client})
+    server.train_embeddings .= 0.0
+    server.test_embeddings .= 0.0
     # test and train accuracy
     for c in clients
         # client compute and upload training embeddings

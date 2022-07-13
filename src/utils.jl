@@ -45,6 +45,28 @@ function split_data(Xtrain::SparseMatrixCSC{Float64, Int64}, Xtest::SparseMatrix
     return Xtrain_split, Xtest_split
 end
 
+# vertically split data
+function get_protected_idx(Xtrain::SparseMatrixCSC{Float64, Int64}, Ytrain::Vector{Int64}, protected_attribute::Int64)
+    dic = Dict{Int64, String}()
+    numTrain = size(Xtrain, 2)
+    na = zero(Int64)
+    nb = zero(Int64)
+    for i = 1:numTrain
+        att = Xtrain[protected_attribute,i]
+        y = Ytrain[i] 
+        if (att == 0.0) && (y == 1)
+            dic[i] = "a"
+            na += 1
+        elseif (att == 1.0) && (y == 1)
+            dic[i] = "b"
+            nb += 1
+        else
+            dic[i] = "c"
+        end
+    end
+    return dic, na, nb
+end
+
 # load data 
 function load_data(filename::String)
     if filename == "adult"

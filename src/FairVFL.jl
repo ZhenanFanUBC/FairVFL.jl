@@ -14,13 +14,13 @@ using Zygote
 export Client, AsynClient
 export Server, AsynServer
 export connect!
-export update_batch!
+export get_protected_idx
 export send_embedding!, update_embedding!
-export update_model!, update_grads!, compute_mini_batch_gradient!, send_gradient!
+export update_model!, update_grads!, compute_gradient!, send_gradient!
 export eval
 export softmax, neg_log_loss
 export load_data, split_data, generate_batches
-export vertical_lr_train!, evaluation
+export fair_vertical_lr_train!, evaluation
 export read_libsvm
 
 include("./utils.jl")
